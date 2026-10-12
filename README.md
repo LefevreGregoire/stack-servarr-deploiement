@@ -1,67 +1,92 @@
-# stack-servarr-deploiement
+# Stack Servarr : Infrastructure Multimédia Automatisée sous Docker
 
-Déploiement d'une infrastructure multimédia 100% automatisée sous Docker (Jellyfin, Servarr, qBittorrent). Gestion de l'acquisition P2P sécurisée, optimisation du stockage via hardlinks et accès distant par Tailscale.
+![Debian](https://img.shields.io/badge/Debian-A81D33?style=for-the-badge&logo=debian&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![Tailscale](https://img.shields.io/badge/Tailscale-242424?style=for-the-badge&logo=tailscale&logoColor=white)
+![Jellyfin](https://img.shields.io/badge/Jellyfin-00A4DC?style=for-the-badge&logo=jellyfin&logoColor=white)
+![qBittorrent](https://img.shields.io/badge/qBittorrent-2F67BA?style=for-the-badge&logo=qbittorrent&logoColor=white)
 
-## Configuration Détaillée par Application
+Ce projet déploie une infrastructure multimédia entièrement automatisée sous Docker. Un utilisateur demande un film ou une série, et la chaîne se charge du reste : recherche sur les indexers, téléchargement sécurisé, tri, renommage puis mise à disposition en streaming. Aucune intervention manuelle n'est nécessaire.
 
-La configuration doit suivre un ordre précis pour garantir la bonne communication des API.
+L'infrastructure est hébergée sur un serveur Debian. Aucun port d'administration n'est exposé sur Internet : on y accède uniquement par un réseau privé Tailscale.
 
-## 1. qBittorrent (Acquisition & Sécurité P2P)
+---
 
-Le client doit être sécurisé pour l'utilisation de trackers privés et configuré pour l'automatisation.
+## Points Clés du Projet
 
-Dans l'onglet qBittorrent : 
+- **Automatisation de bout en bout** : une requête dans Jellyseerr déclenche toute la chaîne (Prowlarr > Sonarr/Radarr > qBittorrent > Jellyfin). La bibliothèque est rafraîchie dès qu'un fichier est importé.
+- **Optimisation du stockage (hardlinks)** : téléchargements et médiathèque partagent le même volume `/data`. Un fichier en seed et sa copie dans la bibliothèque pointent vers les mêmes blocs sur le disque. Il n'occupe donc l'espace qu'une seule fois.
+- **Sécurité P2P pour trackers privés** : chiffrement exigé, DHT, PeX et LSD désactivés pour éviter les fuites d'IP. Le ratio est plafonné à 1.0, puis le torrent est purgé automatiquement par Sonarr/Radarr (Remove Completed).
+- **Contournement des restrictions** : un proxy FlareSolverr résout les challenges Cloudflare des trackers, et le DNS est forcé sur 1.1.1.1 au niveau des conteneurs pour passer le filtrage DNS du FAI.
+- **Cloisonnement réseau** : les interfaces web n'écoutent que sur l'IP Tailscale de l'hôte (100.x.x.x). Les conteneurs communiquent entre eux par leur nom sur un réseau bridge Docker dédié, sans dépendre d'IP dynamiques.
+- **Synchronisation centralisée** : Prowlarr est la seule source de vérité pour les indexers. En mode Full Sync, il les pousse automatiquement vers Sonarr et Radarr.
 
-* **Mode de chiffrement :** Forcé sur exiger le chiffrement.
+---
 
-* **Réseaux décentralisés :** DHT, PeX et LSD décochés pour éviter les fuites d'adresses IP hors des trackers privés.
+## Architecture
 
-* **Catégorisation :** Création des catégories internes radarr et tv-sonarr pour aiguiller les téléchargements.
+```mermaid
+flowchart LR
+    U(("Utilisateur<br>Tailscale")) --> JS["Jellyseerr"]
+    U --> JF["Jellyfin"]
+    JS --> SO["Sonarr"]
+    JS --> RA["Radarr"]
+    PR["Prowlarr"] -->|"Full Sync"| SO
+    PR -->|"Full Sync"| RA
+    PR --> FS["FlareSolverr"]
+    FS --> TR(("Trackers"))
+    SO --> QB["qBittorrent"]
+    RA --> QB
+    QB -->|"/data/torrents"| D[("Volume /data")]
+    D -->|"Hardlink /data/media"| JF
+```
 
-* **Ratio & Rétention :** Limite de partage fixée à un Ratio de 1.0 (ou 7 jours) pour automatiser la mise en pause des torrents complétés.
+| Service | Rôle |
+|---|---|
+| **Jellyfin** | Serveur de streaming multimédia |
+| **Jellyseerr** | Portail de requêtes pour les utilisateurs |
+| **Sonarr / Radarr** | Orchestration PVR : recherche, sélection de qualité, import et renommage |
+| **Prowlarr** | Gestion centralisée des indexers |
+| **FlareSolverr** | Proxy de contournement des protections Cloudflare |
+| **qBittorrent** | Client de téléchargement P2P |
 
-## 2. Prowlarr & FlareSolverr (Indexation Centralisée)
+---
 
-Prowlarr remplace Jackett et agit comme l'annuaire central des trackers : 
+## Stack Technique
 
-* **Liaison FlareSolverr :** Dans Settings > Indexers > Proxies, ajout de FlareSolverr avec l'URL interne http://flaresolverr:8191.
+- **Système hôte** : Debian Linux
+- **Conteneurisation** : Docker Engine, Docker Compose v2 (images linuxserver.io)
+- **Réseau** : Tailscale (VPN mesh WireGuard), réseau bridge Docker interne
+- **Stockage** : arborescence unifiée `/data` compatible hardlinks (convention TRaSH Guides)
 
-* **Ajout des Trackers (ex: C411, Torrent9) :** Saisie des identifiants ou de l'API Key spécifique au tracker.
+---
 
-    - Tags : Le champ Tags (ex: flare) doit impérativement rester vide pour ne pas bloquer la synchronisation vers Sonarr/Radarr.
+## Arborescence
 
-    Synchronisation Automatique (Settings > Apps) :
+```
+/mediatheque
+├── docker-compose.yml
+├── config/              # Configuration persistante de chaque service
+└── data/
+    ├── torrents/        # Zone de seed (qBittorrent)
+    │   ├── radarr/
+    │   └── tv-sonarr/
+    └── media/           # Bibliothèque (Jellyfin)
+        ├── movies/
+        └── tv/
+```
 
-        Ajout de Sonarr (http://sonarr:8989) et Radarr (http://radarr:7878) en utilisant leurs API Keys respectives.
+---
 
-        Sync Level réglé sur Full Sync. Prowlarr pousse désormais tous les trackers configurés directement dans les applications cibles.
+## Documentation Détaillée
 
-3. Sonarr & Radarr (Orchestration PVR)
+Tout le déploiement est documenté pas à pas dans le fichier principal : préparation du système, fichier Docker Compose, configuration de chaque application dans l'ordre des dépendances, tests de validation, résolution d'incidents et sauvegarde.
 
-Ces applications automatisent la recherche, la sélection (ex: ciblage de la qualité Remux 1080p/4K) et le tri des médias.
+**[Documentation complète (DOCUMENTATION.md)](./DOCUMENTATION.md)**
 
-    Liaison qBittorrent (Settings > Download Clients) :
+---
 
-        Host : Utilisation du nom du conteneur qbittorrent au lieu de l'adresse IP locale (évite les pannes en cas de changement d'IP dynamique).
+## Avertissement
 
-        Catégories : Association stricte aux catégories tv-sonarr et radarr créées précédemment.
-
-        Activation de la fonction Remove Completed pour supprimer automatiquement le .torrent de qBittorrent une fois le ratio de seed atteint.
-
-    Gestion des Fichiers (Settings > Media Management) :
-
-        Activation de l'option Hardlinks. Sonarr/Radarr crée un lien physique au lieu de copier le fichier, économisant 100% de l'espace disque pendant la période de seed.
-
-4. Jellyseerr (Portail Utilisateur)
-
-    Connecté aux API de Sonarr, Radarr et Jellyfin pour permettre aux utilisateurs de formuler des requêtes d'ajout de contenu d'un simple clic. Les requêtes approuvées déclenchent toute la chaîne automatisée.
-
-🛡️ Procédures de Maintenance et Bonnes Pratiques
-
-Gestion des suppressions (Libération d'espace disque)
-La suppression d'un média (ex: une saison déjà visionnée) ne doit jamais être effectuée depuis l'interface de Jellyfin. Si Jellyfin supprime le fichier, Sonarr/Radarr détectera l'absence et relancera le téléchargement.
-
-    Procédure : Aller dans Sonarr/Radarr, cliquer sur la corbeille rouge pour supprimer les fichiers physiques, puis passer le média en statut Unmonitored (icône marque-page) pour empêcher toute nouvelle recherche automatique.
-
-Mise à jour des conteneurs
-Afin de maintenir la stabilité et la sécurité des API (notamment TMDB/TVDB pour Jellyseerr), les conteneurs sont mis à jour individuellement de manière transparente :
+Ce projet sert à apprendre l'administration système, la conteneurisation et la sécurisation réseau. L'utilisateur reste seul responsable des contenus qu'il télécharge et partage, dans le respect de la législation en vigueur et du droit d'auteur.
+`
